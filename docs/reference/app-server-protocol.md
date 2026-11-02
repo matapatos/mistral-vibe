@@ -106,8 +106,12 @@ edit/save, edit/cancel, edit/abandon, steer and resume. Queue rules are:
 - Stable item IDs and FIFO order; adjacent prompts remain separate turns.
 - Replace uses structured entries and preserves ID, creation time and position.
   A removed or already-started target returns `not_found`.
-- Completed turns promote at most one next item. Failed or interrupted turns
-  retain the remaining items and pause automatic draining.
+- Completed turns promote at most one next item, and only when the turn-success
+  judge (TypeSafe AI's Jev decision model, authenticated with `TYPESAFE_API_KEY`)
+  rules the completed turn a success; a judged failure retains the remaining
+  items and pauses automatic draining, as do failed or interrupted turns. The
+  `queue_success_gate` setting (default false, `"jev"` to enable) names the
+  judge; when off, a completed turn always promotes the next item.
 - Remove and resume are idempotent. Enqueue and replace accept idempotency keys;
   keys remain reserved for the live session and conflicting reuse fails.
 - A fixed size limit rejects overflow without modifying the queue.

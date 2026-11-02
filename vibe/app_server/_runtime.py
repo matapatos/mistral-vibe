@@ -1848,6 +1848,7 @@ class HarnessProcess:
                     # Set in every mode: a mid-turn switch into smart approve keeps
                     # the turn's model, which matches the turn's provider.
                     classifier_model=classifier_model_config.name,
+                    queue_success_gate=config.queue_success_gate,
                     max_tokens=settings.max_tokens,
                     # 0 is how a TOML file turns a limit off.
                     agent_max_tokens=config.agent_max_output_tokens or None,

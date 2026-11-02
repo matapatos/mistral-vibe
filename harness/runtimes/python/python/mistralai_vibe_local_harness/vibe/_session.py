@@ -195,6 +195,10 @@ from mistralai_vibe_local_harness.vibe._turn_queue import (
     QueuedTurnRecord,
     SessionTurnQueue,
 )
+from mistralai_vibe_local_harness.vibe._turn_success import (
+    JevTurnSuccessJudge,
+    TurnSuccessJudge,
+)
 from mistralai_vibe_local_harness.vibe.plugins import (
     SessionPluginBinding,
     SessionPluginProvider,
@@ -269,6 +273,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         foreign_hook_handlers: HookHandlers | None = None,
         release_plugins: Callable[[], Awaitable[None]] | None = None,
         read_plugin_info: Callable[[], Awaitable[PluginInfo]] | None = None,
+        turn_success_judge: TurnSuccessJudge | None = None,
     ) -> None:
         self._session_id = session_id
         self._created_at = created_at
@@ -380,6 +385,11 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         self._turn_task_ids: dict[asyncio.Task[None], str] = {}
         self._settling_turn_tasks: set[asyncio.Task[None]] = set()
         self._queue_drain_task: asyncio.Task[None] | None = None
+        # Holds a completed turn's queued messages until the success judge
+        # rules on that turn; a pending gate blocks direct queue drains.
+        self._queue_gate_task: asyncio.Task[None] | None = None
+        self._queue_gate_turn_id: str | None = None
+        self._turn_success_judge = turn_success_judge
         self._turn_queue_edit_save_receipts: dict[str, _QueuedTurnEditSaveReceipt] = {}
         self._settle_configuration: Callable[[], Awaitable[None]] | None = None
         self._after_recovery: Callable[[], Awaitable[None]] | None = None
@@ -594,10 +604,9 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             return True
         if self._turn_queue:
             return True
-        if self._queue_drain_task is not None and not self._queue_drain_task.done():
-            return True
-        if self._title_task is not None and not self._title_task.done():
-            return True
+        for task in (self._queue_drain_task, self._queue_gate_task, self._title_task):
+            if task is not None and not task.done():
+                return True
         if any(not task.done() for task in self._turn_tasks):
             return True
         return self._runtime is not None and self._runtime.has_active_process_work
@@ -2792,6 +2801,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 with suppress(asyncio.CancelledError):
                     await reserved_task
             await self._cancel_queue_drain_task()
+            await self._cancel_queue_gate_task()
             await self._cancel_active_work()
             await self._cancel_title_task()
             await self._settle_inactive_turn_tasks()
@@ -2959,6 +2969,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     def _schedule_turn_queue_drain(self) -> None:
         if (
             self._closed
+            or self._queue_gate_turn_id is not None
             or self._reserved_turn_id is not None
             or self.active_turn_id is not None
         ):
@@ -3089,7 +3100,79 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             if self._turn_queue.pause():
                 self._publish_turn_queue_updated()
             return
-        self._schedule_turn_queue_drain()
+        # With the gate on, a completed turn releases the queue only after the
+        # judge rules it a success; with the gate off (default) it drains
+        # directly. Failed and interrupted turns pause the queue above.
+        if self._queue_success_gate_enabled():
+            self._schedule_turn_queue_gate(turn_id)
+        else:
+            self._schedule_turn_queue_drain()
+
+    def _queue_success_gate_enabled(self) -> bool:
+        config = self._title_config
+        return config is not None and bool(config.queue_success_gate)
+
+    def _schedule_turn_queue_gate(self, turn_id: str) -> None:
+        if self._closed or self._turn_queue.peek_next() is None:
+            return
+        existing = self._queue_gate_task
+        if existing is not None and not existing.done():
+            return
+        self._queue_gate_turn_id = turn_id
+        task = asyncio.create_task(
+            self._gate_turn_queue_on_success(turn_id),
+            name=f"harness-queue-gate:{self._session_id}",
+        )
+        self._queue_gate_task = task
+        task.add_done_callback(self._turn_queue_gate_finished)
+
+    async def _gate_turn_queue_on_success(self, turn_id: str) -> None:
+        try:
+            success = await self._judge_turn_success()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Turn success judge failed",
+                extra={"harness_backend": "unified", "session_id": self._session_id},
+                exc_info=True,
+            )
+            success = False
+        # Clear the gate before draining: the drain refuses while a gate pends.
+        if self._queue_gate_turn_id == turn_id:
+            self._queue_gate_turn_id = None
+        if self._closed or turn_id != self._last_queue_terminal_turn_id:
+            return
+        if success:
+            self._schedule_turn_queue_drain()
+        elif self._turn_queue.pause():
+            self._publish_turn_queue_updated()
+
+    async def _judge_turn_success(self) -> bool:
+        judge = self._turn_success_judge
+        runtime = self._runtime
+        entries = (
+            list(runtime.projection.history.entries) if runtime is not None else []
+        )
+        if judge is not None:
+            return await judge(entries)
+        config = self._title_config
+        if config is None:
+            return False
+        return await JevTurnSuccessJudge(config)(entries)
+
+    def _turn_queue_gate_finished(self, task: asyncio.Task[None]) -> None:
+        if self._queue_gate_task is task:
+            self._queue_gate_task = None
+            self._queue_gate_turn_id = None
+        if task.cancelled():
+            return
+        if error := task.exception():
+            asyncio.get_running_loop().call_exception_handler({
+                "message": "Unified Harness turn queue success gate failed",
+                "exception": error,
+                "task": task,
+            })
 
     def _emit_event(self, event: JsonObject) -> None:
         if self._buffered_events is not None:
@@ -3319,6 +3402,16 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     async def _cancel_queue_drain_task(self) -> None:
         task = self._queue_drain_task
         self._queue_drain_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    async def _cancel_queue_gate_task(self) -> None:
+        task = self._queue_gate_task
+        self._queue_gate_task = None
+        self._queue_gate_turn_id = None
         if task is None or task.done():
             return
         task.cancel()

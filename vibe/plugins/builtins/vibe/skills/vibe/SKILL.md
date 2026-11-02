@@ -501,6 +501,12 @@ disabled_agents = ["auto-approve"]
 # Intended for admin-managed (enterprise) config.
 enable_auto_approve = false
 
+# Run queued prompts only when the previous turn is judged a success.
+# "jev" (TypeSafe AI's Jev decision model, needs TYPESAFE_API_KEY) is the
+# only accepted judge. Off by default: a completed turn always promotes the
+# next queued prompt; failed or interrupted turns still pause the queue.
+queue_success_gate = false
+
 # Opt-in builtin agents (only affects agents with install_required=True, e.g. lean)
 installed_agents = ["lean"]
 
@@ -1210,7 +1216,10 @@ and merged into a single follow-up turn, so everything queued during one
 generation is delivered to the agent together (not one turn per prompt) once
 it finishes. Each queued prompt keeps its own message so it stays individually
 editable and removable. This includes plain prompts, `/skill ...`
-prompts, and prompts with `@` mentions. `!bash`, non-side-channel slash
+prompts, and prompts with `@` mentions. With `queue_success_gate = "jev"` (opt
+in; needs `TYPESAFE_API_KEY`), a queued prompt runs after the current turn only
+when the previous turn is judged a success by TypeSafe AI's Jev decision
+model; a judged failure pauses the queue until you resume it. `!bash`, non-side-channel slash
 commands, and `&teleport` require an idle session and are rejected while busy
 with a notice above the input that stays until the next key. **Ctrl+C** removes the newest queued prompt (LIFO); **Esc**
 interrupts the active turn and pauses the remaining queue; pressing Enter

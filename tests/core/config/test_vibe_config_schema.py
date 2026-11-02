@@ -1093,6 +1093,39 @@ def test_log_level_accepts_canonical_levels(level: str) -> None:
     assert VibeConfigSchema(log_level=level).log_level == level
 
 
+def test_queue_success_gate_defaults_to_false() -> None:
+    assert VibeConfigSchema().queue_success_gate is False
+
+
+@pytest.mark.parametrize("value", ["jev", " JEV ", "JEV"])
+def test_queue_success_gate_accepts_jev(value: str) -> None:
+    assert VibeConfigSchema(queue_success_gate=value).queue_success_gate == "jev"
+
+
+def test_queue_success_gate_jev_without_a_key_emits_validation_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    config = VibeConfigSchema(queue_success_gate="jev")
+
+    assert len(config.validation_warnings) == 1
+    assert "TYPESAFE_API_KEY" in config.validation_warnings[0]
+    assert "queued prompts always run" in config.validation_warnings[0]
+
+
+def test_queue_success_gate_jev_with_a_key_emits_no_validation_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
+    assert VibeConfigSchema(queue_success_gate="jev").validation_warnings == ()
+
+
+@pytest.mark.parametrize("value", [True, "mistral-medium-3", "laya"])
+def test_queue_success_gate_rejects_unknown_values(value) -> None:
+    with pytest.raises(ValidationError):
+        VibeConfigSchema(queue_success_gate=value)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool", ["bash", "git_bash", "powershell"])
 async def test_a_shell_default_timeout_above_its_maximum_is_a_config_error(

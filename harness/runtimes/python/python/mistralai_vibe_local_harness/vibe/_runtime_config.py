@@ -379,6 +379,14 @@ class LocalRuntimeAdapterConfig:
     # Model for the classify gate; empty keeps the Runtime default. A name, not a
     # route: the gate pins its own sampling settings.
     classifier_model: str = ""
+    # When set, a completed turn releases the prompt queue only if the named
+    # turn-success judge rules it a success; False (default) drains on any
+    # completed turn (failed/interrupted turns still pause the queue).
+    # "jev" (TypeSafe AI's Jev decision model) is the only judge: it reads
+    # the key from the TYPESAFE_API_KEY env var, pauses the queue only on a
+    # verdict or call failure, and steps aside (queue drains, warning logged)
+    # when the key is unset.
+    queue_success_gate: bool | str = False
     max_tokens: int | None = None
     # Caps sent as ``max_tokens`` on every agent or compaction request whatever
     # the format; None sends one only where the format requires it.
@@ -641,6 +649,7 @@ _LOCAL_RUNTIME_ADAPTER_BEHAVIOR_FIELDS = frozenset({
     "title_model",
     "title_prompt",
     "classifier_model",
+    "queue_success_gate",
     "max_tokens",
     "agent_max_tokens",
     "compaction_max_tokens",

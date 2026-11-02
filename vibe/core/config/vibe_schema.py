@@ -439,6 +439,23 @@ def _normalize_log_level(value: Any) -> Any:
     return normalized
 
 
+_QUEUE_SUCCESS_GATES = frozenset({"jev"})
+
+
+def _normalize_queue_success_gate(value: Any) -> Any:
+    """False keeps draining on any completed turn; a name selects the judge."""
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _QUEUE_SUCCESS_GATES:
+            return normalized
+    raise ValueError(
+        f"Invalid queue_success_gate {value!r}; "
+        f"expected false or one of {sorted(_QUEUE_SUCCESS_GATES)}"
+    )
+
+
 @functools.cache
 def _mistral_efforts() -> frozenset[str]:
     """The efforts the Mistral SDK puts on the wire; it leaves any other out."""
@@ -779,6 +796,18 @@ class VibeConfigSchema(ConfigSchema):
             "level is available and the flag and bypass_tool_permissions are ignored "
             "(per-tool permissions still apply). Intended for admin-managed "
             "(enterprise) config to forbid auto-approving tool calls."
+        ),
+    )
+    queue_success_gate: Annotated[
+        bool | str, WithReplaceMerge(), BeforeValidator(_normalize_queue_success_gate)
+    ] = Field(
+        default=False,
+        description=(
+            "Run queued prompts only when the previous turn is judged a "
+            'success by the named gate. "jev" (TypeSafe AI\'s Jev decision '
+            "model, needs TYPESAFE_API_KEY) is the only judge. When false "
+            "(default), a completed turn always promotes the next queued "
+            "prompt; failed or interrupted turns still pause the queue."
         ),
     )
 
@@ -1436,6 +1465,23 @@ class VibeConfigSchema(ConfigSchema):
             self._validation_warnings.append(message)
             object.__setattr__(self, "_missing_pin", unknown)
             object.__setattr__(self, "active_model", UNPINNED_ACTIVE_MODEL)
+        return self
+
+    @model_validator(mode="after")
+    def _warn_unconfigured_queue_success_gate(self) -> VibeConfigSchema:
+        # The judge bypasses itself without the key, so the banner names the
+        # setting to change rather than the behavior to expect.
+        if (
+            self.queue_success_gate == "jev"
+            and not os.environ.get("TYPESAFE_API_KEY", "").strip()
+        ):
+            message = (
+                'queue_success_gate = "jev" but TYPESAFE_API_KEY is unset — '
+                "the success gate cannot judge, so queued prompts always run. "
+                "Set the key or turn the gate off."
+            )
+            logger.warning("%s", message)
+            self._validation_warnings.append(message)
         return self
 
     @model_validator(mode="after")
