@@ -215,6 +215,10 @@ def test_file_watcher_for_autocomplete_is_enabled_by_default() -> None:
     assert VibeConfigSchema().file_watcher_for_autocomplete is True
 
 
+def test_file_autocomplete_defaults_to_enabled() -> None:
+    assert VibeConfigSchema().enable_file_autocomplete is True
+
+
 def test_subagent_status_list_is_enabled_by_default() -> None:
     assert VibeConfigSchema().show_subagent_status_list is True
 
@@ -266,21 +270,6 @@ def test_subagent_limits_default_to_32() -> None:
 def test_subagent_limits_reject_non_positive_values(setting: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         VibeConfigSchema.model_validate(setting)
-
-
-def test_smart_approve_is_not_offered_by_default() -> None:
-    config = VibeConfigSchema()
-    assert config.smart_approve_offered() is False
-
-
-def test_smart_approve_available_flag_offers_without_defaulting() -> None:
-    config = VibeConfigSchema(smart_approve_available=True, default_agent="ask")
-    assert config.smart_approve_offered() is True
-
-
-def test_smart_approve_default_flag_offers_and_defaults() -> None:
-    config = VibeConfigSchema(smart_approve_default=True)
-    assert config.smart_approve_offered() is True
 
 
 def test_default_model_carries_the_sourced_values() -> None:
@@ -1102,6 +1091,39 @@ def test_log_level_rejects_invalid() -> None:
 @pytest.mark.parametrize("level", ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
 def test_log_level_accepts_canonical_levels(level: str) -> None:
     assert VibeConfigSchema(log_level=level).log_level == level
+
+
+def test_queue_success_gate_defaults_to_false() -> None:
+    assert VibeConfigSchema().queue_success_gate is False
+
+
+@pytest.mark.parametrize("value", ["jev", " JEV ", "JEV"])
+def test_queue_success_gate_accepts_jev(value: str) -> None:
+    assert VibeConfigSchema(queue_success_gate=value).queue_success_gate == "jev"
+
+
+def test_queue_success_gate_jev_without_a_key_emits_validation_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    config = VibeConfigSchema(queue_success_gate="jev")
+
+    assert len(config.validation_warnings) == 1
+    assert "TYPESAFE_API_KEY" in config.validation_warnings[0]
+    assert "queued prompts always run" in config.validation_warnings[0]
+
+
+def test_queue_success_gate_jev_with_a_key_emits_no_validation_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
+    assert VibeConfigSchema(queue_success_gate="jev").validation_warnings == ()
+
+
+@pytest.mark.parametrize("value", [True, "mistral-medium-3", "laya"])
+def test_queue_success_gate_rejects_unknown_values(value) -> None:
+    with pytest.raises(ValidationError):
+        VibeConfigSchema(queue_success_gate=value)
 
 
 @pytest.mark.asyncio

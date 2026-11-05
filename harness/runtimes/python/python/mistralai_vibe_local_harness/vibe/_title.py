@@ -4,7 +4,6 @@ import asyncio
 from collections.abc import Sequence
 from contextlib import suppress
 import dataclasses
-import json
 import logging
 import re
 
@@ -24,6 +23,10 @@ from mistralai_vibe_local_harness.vibe._credentials import (
     ProviderCredentialSnapshot,
 )
 from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
+from mistralai_vibe_local_harness.vibe._transcript import (
+    TranscriptPolicy,
+    build_transcript,
+)
 from mistralai_vibe_local_harness.vibe._utility_completion import (
     UtilityCompletionError,
     execute_utility_completion,
@@ -56,21 +59,18 @@ Examples:
 Respond with ONLY the title, on one line, with no explanation.
 """
 
-_ELISION = "\n\n[…]\n\n"
 _WHITESPACE_RE = re.compile(r"\s+")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _WRAPPING_QUOTES = "\"'`“”‘’"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class TitlePolicy:
+class TitlePolicy(TranscriptPolicy):
+    # Transcript limits are inherited from TranscriptPolicy, which also feeds
+    # the queued-turn success judge's transcript.
     confirm_after_steps: int = 6
     capped_max_generations: int = 2
     initial_max_steps: int = 3
-    max_transcript_chars: int = 6000
-    head_transcript_chars: int = 1500
-    max_message_chars: int = 2000
-    max_tool_chars: int = 400
     request_timeout_seconds: float = 6.0
     retry_budget_seconds: float = 10.0
     total_timeout_seconds: float = 20.0
@@ -84,44 +84,8 @@ class TitlePolicy:
         "untitled",
     })
 
-    @property
-    def tail_transcript_chars(self) -> int:
-        return self.max_transcript_chars - self.head_transcript_chars
-
 
 DEFAULT_TITLE_POLICY = TitlePolicy()
-
-
-def build_title_transcript(
-    entries: Sequence[JsonObject], *, policy: TitlePolicy = DEFAULT_TITLE_POLICY
-) -> str:
-    blocks: list[str] = []
-    for entry in entries:
-        entry_type = entry.get("type")
-        if entry_type == "message":
-            block = _message_block(entry, policy=policy)
-        elif entry_type == "effect":
-            block = _tool_block(entry, policy=policy)
-        else:
-            continue
-        if block:
-            blocks.append(block)
-    transcript = "\n\n".join(blocks).strip()
-    if len(transcript) <= policy.max_transcript_chars:
-        return transcript
-    head = transcript[: policy.head_transcript_chars].rstrip()
-    tail = transcript[-policy.tail_transcript_chars :].lstrip()
-    return f"{head}{_ELISION}{tail}"
-
-
-def _message_block(entry: JsonObject, *, policy: TitlePolicy) -> str | None:
-    role = entry.get("role")
-    if role not in {"user", "assistant"}:
-        return None
-    text = _entry_text(entry).strip()
-    if not text:
-        return None
-    return f"{role}: {text[: policy.max_message_chars]}"
 
 
 def clean_title(
@@ -233,7 +197,7 @@ async def generate_session_title(
     policy: TitlePolicy = DEFAULT_TITLE_POLICY,
     previous_title: str | None = None,
 ) -> str | None:
-    transcript = build_title_transcript(entries, policy=policy)
+    transcript = build_transcript(entries, policy=policy)
     if not transcript:
         return None
     try:
@@ -331,60 +295,10 @@ class TitleCadence:
         self._generated_title = title
 
 
-def _entry_text(entry: JsonObject) -> str:
-    content = entry.get("content")
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for part in content:
-        if isinstance(part, dict):
-            value = part.get("text")
-            if isinstance(value, str):
-                parts.append(value)
-    return "\n".join(parts)
-
-
-def _tool_block(entry: JsonObject, *, policy: TitlePolicy) -> str | None:
-    detail = entry.get("detail")
-    if not isinstance(detail, dict):
-        detail = {}
-    name = detail.get("toolName")
-    if not isinstance(name, str) or not name:
-        title = entry.get("title")
-        name = title if isinstance(title, str) and title else "tool"
-    lines: list[str] = []
-    call = detail.get("input")
-    if call is not None:
-        call_text = (
-            call
-            if isinstance(call, str)
-            else json.dumps(call, ensure_ascii=False, default=str)
-        ).strip()
-        if call_text and call_text not in {"{}", "[]", '""'}:
-            lines.append(f"tool({name}): {call_text[: policy.max_tool_chars]}")
-    state = entry.get("state")
-    if isinstance(state, dict):
-        output = state.get("outputText")
-        if isinstance(output, str) and output.strip():
-            lines.append(
-                f"tool result({name}): {output.strip()[: policy.max_tool_chars]}"
-            )
-        elif state.get("status") == "failed":
-            error = state.get("error")
-            message = error.get("message") if isinstance(error, dict) else None
-            if isinstance(message, str) and message.strip():
-                lines.append(
-                    f"tool result({name}) failed: "
-                    f"{message.strip()[: policy.max_tool_chars]}"
-                )
-    return "\n".join(lines) if lines else None
-
-
 __all__ = [
     "DEFAULT_TITLE_POLICY",
     "TitleCadence",
     "TitlePolicy",
-    "build_title_transcript",
     "clean_title",
     "count_model_steps",
     "execute_title_completion",
